@@ -28,7 +28,6 @@ CHECK_API_URL = 'https://balancesteam.ru/api/v2/partner/check'
 CREATE_ORDER_URL = 'https://balancesteam.ru/api/v2/partner/create'
 ADMIN_ID = 2125819462
 COMMISSION_RUB = 0.137
-COMMISSION_USD = 0.09
 # Инициализация YooKassa
 Configuration.account_id = YKASSA_SHOP_ID
 Configuration.secret_key = YKASSA_SECRET_KEY
@@ -49,8 +48,6 @@ def check_balance(apikey):
 def check_steam_login(apikey, steam_login, currency):
     if currency == 'RUB':
         service_id = 5955
-    elif currency == 'USD':
-        service_id = 5999
 
     response = requests.post(CHECK_API_URL, data={'apikey': apikey, 'login_or_email': steam_login, 'service_id': service_id})
     return response.json()
@@ -94,8 +91,6 @@ def create_payment_ykassa(amount, steam_login, currency):
 def calculate_commission(amount, currency):
     if currency == 'RUB':    
         return round(amount * COMMISSION_RUB, 2)  # 13.7% комиссия
-    elif currency == 'USD':
-        return round(amount * COMMISSION_USD, 2)  # 9% комиссия
 
 # /start
 async def start(update: Update, context: CallbackContext):
@@ -140,8 +135,9 @@ async def admin_panel(update: Update, context: CallbackContext):
     await query.answer()
 
     keyboard = [
-        [InlineKeyboardButton("✏️ Изменить комиссию", callback_data='choose_fee_type')],
+        [InlineKeyboardButton("🧾 Комиссия", callback_data='choose_fee_type')],
         [InlineKeyboardButton("📊 Проверка баланса", callback_data='check_balance')],
+        [InlineKeyboardButton("📊 Статистика", callback_data='stats')],
         [InlineKeyboardButton("⬅️ Назад в меню", callback_data='back_to_menu')],
     ]
 
@@ -184,15 +180,26 @@ async def choose_fee_type(update: Update, context: CallbackContext):
     await query.answer()
 
     keyboard = [
-        [
-            InlineKeyboardButton("🇷🇺 Steam (RUB)", callback_data='edit_fee_rub'),
-            InlineKeyboardButton("🇺🇸 Steam (USD)", callback_data='edit_fee_usd'),
-        ],
+        [InlineKeyboardButton("💸 Посмотреть комиссию Steam (RUB)", callback_data='show_fee_rub')],
+        [InlineKeyboardButton("🇷🇺 Изменить комиссию Steam (RUB)", callback_data='edit_fee_rub')],
         [InlineKeyboardButton("⬅️ Назад", callback_data='admin_panel')],
     ]
 
     await query.edit_message_text(
         "Выберите, для чего вы хотите изменить комиссию:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+#  Изменить комиссию
+async def show_fee_rub(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+
+    keyboard = [
+        [InlineKeyboardButton("⬅️ Назад", callback_data='choose_fee_type')],
+    ]
+    await query.edit_message_text(
+         f"💼 комиссия на Steam (RUB):\n\n{round(COMMISSION_RUB * 100, 2)}%",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -212,42 +219,28 @@ async def edit_fee_rub(update: Update, context: CallbackContext):
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-async def edit_fee_usd(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-
-    keyboard = [
-        [InlineKeyboardButton("⬅️ Назад", callback_data='choose_fee_type')],
-    ]
-    context.user_data["awaiting_fee"] = "COMMISSION_USD"
-    await query.edit_message_text(
-        "✏️ Введите новую комиссию для Steam (USD):\n"
-        "• 1.0 = 100%\n"
-        "• 0.01 = 1%\n\n",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
 async def handle_text(update: Update, context: CallbackContext):
     fee_type = context.user_data.get("awaiting_fee")
     login = context.user_data.get('awaiting_login')
     sum_on_steam = context.user_data.get('awaiting_sum_on_steam')
-
-    if fee_type in ("COMMISSION_RUB", "COMMISSION_USD"):
+    print(fee_type)
+    if fee_type in ("COMMISSION_RUB", ''):
         try:
             percent = float(update.message.text)
             if percent <= 0:
                 raise ValueError("Меньше или равно нулю")
 
-            context.bot_data[fee_type] = percent
-            print(context.bot_data.get(fee_type))
+            global COMMISSION_RUB
+            COMMISSION_RUB =  percent
+            print(COMMISSION_RUB)
             context.user_data["awaiting_fee"] = None
             keyboard = [
-                [InlineKeyboardButton("⬅️ Назад", callback_data='admin_panel')],
+                [InlineKeyboardButton("⬅️ Назад", callback_data='choose_fee_type')],
             ]
             await update.message.reply_text(
                 f"✅ Комиссия обновлена для {fee_type.upper()}:\n"
                 f"• Введено: {percent}\n"
-                f"• Сохранено как: {percent:.8f}%",
+                f"• Сохранено как: {percent * 100}%",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
         except ValueError:
@@ -330,19 +323,16 @@ async def currency_chosen(update: Update, context: CallbackContext):
     # Получаем валюту из callback_data
     currency = query.data.split('_')[1].upper()
     context.user_data['currency'] = currency
-    context.user_data['awaiting_login'] = True
+
     if currency == 'RUB':
         # Переход в следующую общую функцию — ввод логина
+        context.user_data['awaiting_login'] = True
         await query.edit_message_text("🧾 Введите логин от вашего Steam аккаунта:", reply_markup=InlineKeyboardMarkup(keyboard))
     elif currency == 'USD':
         keyboard = [
-        [
-            InlineKeyboardButton("5$", callback_data='amount_5'),
-            InlineKeyboardButton("10$", callback_data='amount_10'),
-            InlineKeyboardButton("20$", callback_data='amount_20'),
+            [InlineKeyboardButton("⬅️ Назад", callback_data='topup_handler')],
         ]
-        ]
-        await query.edit_message_text("💵 Выберите сумму пополнения в USD", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("🇺🇸 USD (временно недоступно):", reply_markup=InlineKeyboardMarkup(keyboard))
 
 def transfer_to_steam(amount, login):
     response = requests.post(
@@ -363,35 +353,41 @@ def transfer_to_steam(amount, login):
         return False
 
 # Асинхронная проверка статуса платежа
-async def check_payment_status(payment_id, amount, query, login):
+async def check_payment_status(payment_id, amount, query, recipient):
     print("Начинаем проверку статуса платежа...")
+    
+    previous_message = None  # Переменная для хранения предыдущего сообщения
+    
     while True:
         try:
             updated_payment = Payment.find_one(payment_id)
             print(f"Платеж с ID {payment_id} получен. Статус: {updated_payment.status}")
-            
+
+            # Проверка на успешный статус
             if updated_payment.status == "succeeded":
                 print("Оплата успешна.")
-                # Оплата успешна, переводим деньги на Steam
-                result = transfer_to_steam(amount, login)  # Это ваш код для перевода средств на Steam
+                
+                # Это Steam логин — переводим средства
+                result = transfer_to_steam(amount, recipient)
                 if result:
-                    await query.edit_message_text(
-                        f"💸 Деньги поступили! 🎉 Ожидайте, пожалуйста, поступление на ваш баланс Steam. ⏳",
-                    )
+                    message = "💸 Деньги поступили! 🎉 Ожидайте, пожалуйста, поступление на ваш баланс Steam. ⏳"
+                    break
                 else:
-                    await query.edit_message_text(
-                    "⚠️ Упс! Что-то пошло не так при, пополнении баланса Steam.\n"
-                    "🔄 Попробуйте снова чуть позже.\n\n"
-                    "💬 Если проблема повторяется — свяжитесь с администратором для помощи. 🙏"
-                )
+                    message = (
+                        "⚠️ Упс! Что-то пошло не так при пополнении баланса Steam.\n"
+                        "💬 свяжитесь с администратором для помощи. 🙏"
+                    )
+                if previous_message != message:
+                    await query.edit_message_text(message)
+                    previous_message = message
                 break
 
             elif updated_payment.status == "canceled":
                 print("Оплата была отменена.")
-                # Оплата была отменена
-                await query.edit_message_text(
-                    f"❌ Оплата была отменена. Попробуйте снова! 💡",
-                )
+                message = "❌ Оплата была отменена. Попробуйте снова! 💡"
+                if previous_message != message:
+                    await query.edit_message_text(message)
+                    previous_message = message
                 break
             else:
                 # Если статус еще не определен, ждем некоторое время перед следующей проверкой
@@ -438,13 +434,12 @@ async def cancel(update: Update, context: CallbackContext):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
     app.add_handler(CallbackQueryHandler(choose_fee_type, pattern="^choose_fee_type$"))
     app.add_handler(CallbackQueryHandler(back_to_menu, pattern="^back_to_menu$"))
     app.add_handler(CallbackQueryHandler(edit_fee_rub, pattern="^edit_fee_rub$"))
-    app.add_handler(CallbackQueryHandler(edit_fee_usd, pattern="^edit_fee_usd$"))
+    app.add_handler(CallbackQueryHandler(show_fee_rub, pattern="^show_fee_rub$"))
     app.add_handler(CallbackQueryHandler(handle_check_balance, pattern="^check_balance$"))
     app.add_handler(CallbackQueryHandler(topup_handler, pattern="^topup$"))
     app.add_handler(CallbackQueryHandler(topup_handler, pattern="^topup_handler$"))
