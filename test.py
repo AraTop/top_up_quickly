@@ -1,3 +1,4 @@
+from decimal import Decimal
 import requests
 import logging
 from telegram import (
@@ -216,6 +217,65 @@ async def admin_panel(update: Update, context: CallbackContext):
         "⚙️ Админ-панель:\n\nВыберите действие:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+async def stats(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+
+    keyboard = [
+        [InlineKeyboardButton("💸 Статистика заказов", callback_data='view_stats')],
+        [InlineKeyboardButton("⬅️ Назад", callback_data='admin_panel')],
+    ]
+
+    await query.edit_message_text(
+        "Выберите, из списка",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def view_stats(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        row = await conn.fetchrow("""
+            SELECT 
+                COUNT(*) AS total_orders,
+                SUM(amount) AS total_amount,
+                SUM(commission) AS total_commission
+            FROM steam_topups
+        """)
+        await conn.close()
+
+        total_orders = row['total_orders'] or 0
+        total_amount = row['total_amount'] or Decimal(0.0)  # Убедитесь, что total_amount — Decimal
+        total_commission = row['total_commission'] or Decimal(0.0)  # Убедитесь, что total_commission — Decimal
+
+        # Общая сумма пополнений (без комиссии)
+        net_amount = total_amount - total_commission
+
+        # Общая сумма пополнений с комиссией
+        gross_amount = total_amount
+
+        text = (
+            "💸 <b>Статистика заказов</b>:\n\n"
+            f"📦 Всего заказов: <b>{total_orders}</b>\n"
+            f"💸 Общая сумма (без комиссии): <b>{net_amount:.2f}₽</b>\n"
+            f"💸 Общая сумма (с комиссией): <b>{gross_amount:.2f}₽</b>\n"
+            f"💰 Общая комиссия: <b>{total_commission:.2f}₽</b>"
+        )
+
+        keyboard = [[InlineKeyboardButton("⬅️ Назад в меню", callback_data='back_to_menu')]]
+
+        await query.edit_message_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    except Exception as e:
+        print(f"Ошибка при получении статистики: {e}")
+        await query.edit_message_text("⚠️ Произошла ошибка при получении статистики.")
 
 async def handle_check_balance(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -528,6 +588,8 @@ def main():
     app.add_handler(CallbackQueryHandler(currency_chosen, pattern="^currency_usd$"))
     app.add_handler(CallbackQueryHandler(cancel, pattern="^cancel_payment$"))
     app.add_handler(CallbackQueryHandler(view_my_orders, pattern="^my_orders$"))
+    app.add_handler(CallbackQueryHandler(view_stats, pattern="^view_stats$"))
+    app.add_handler(CallbackQueryHandler(stats, pattern="^stats$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.run_polling()
 
