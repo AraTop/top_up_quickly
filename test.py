@@ -17,17 +17,43 @@ from telegram.ext import (
 from yookassa import Configuration, Payment
 import asyncio
 from datetime import datetime
+from dotenv import load_dotenv
+import os
+import asyncpg
+
+load_dotenv()
 
 # Настройки
-API_KEY = "e1f2ef350da0032b567b66a7c36e509e"
-BOT_TOKEN = "8197845963:AAGS9dWU2QNr4NIo_TfqWvmmkHXUuXT2QsE"
-YKASSA_SHOP_ID = 1066265
-YKASSA_SECRET_KEY = "test_ha5ciX5g5F5ECL6qqgEM9cd5PFvD8mPuXU-9ov3BwSc"
+API_KEY = os.getenv("API_KEY")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+DATABASE_URL = os.getenv("DATABASE_URL")
+YKASSA_SHOP_ID = os.getenv("YKASSA_SHOP_ID")
+YKASSA_SECRET_KEY = os.getenv("YKASSA_SECRET_KEY")
+
+ADMINS = [5706003073,2125819462]
 BALANCE_API_URL = 'https://balancesteam.ru/api/v2/partner/balance'
 CHECK_API_URL = 'https://balancesteam.ru/api/v2/partner/check'
 CREATE_ORDER_URL = 'https://balancesteam.ru/api/v2/partner/create'
-ADMIN_ID = 2125819462
 COMMISSION_RUB = 0.137
+
+async def connect_db():
+    return await asyncpg.create_pool(DATABASE_URL)
+
+async def log_steam_topup(telegram_id, username, steam_login, amount, commission):
+    pool = await connect_db()
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO steam_topups (telegram_id, username, steam_login, amount, commission)
+            VALUES ($1, $2, $3, $4, $5)
+            """,
+            telegram_id, username, steam_login, amount, commission
+        )
+    
+    # Закрываем подключение
+    await pool.close()
+
 # Инициализация YooKassa
 Configuration.account_id = YKASSA_SHOP_ID
 Configuration.secret_key = YKASSA_SECRET_KEY
@@ -102,9 +128,10 @@ async def start(update: Update, context: CallbackContext):
 
     keyboard = [
         [InlineKeyboardButton("💰 Пополнить Steam", callback_data='topup')],
+        [InlineKeyboardButton("📦 Мои заказы", callback_data='my_orders')],
     ]
 
-    if user_id == ADMIN_ID:
+    if user_id in ADMINS:
         keyboard.append([InlineKeyboardButton("⚙️ Админ-панель", callback_data='admin_panel')])
 
     if update.callback_query:
@@ -123,12 +150,56 @@ async def back_to_menu(update: Update, context: CallbackContext):
 
     keyboard = [
         [InlineKeyboardButton("💰 Пополнить Steam", callback_data='topup')],
+        [InlineKeyboardButton("📦 Мои заказы", callback_data='my_orders')],
     ]
 
-    if user_id == ADMIN_ID:
+    if user_id in ADMINS:
         keyboard.append([InlineKeyboardButton("⚙️ Админ-панель", callback_data='admin_panel')])
 
     await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def view_my_orders(update: Update, context: CallbackContext):
+    user_id = update.effective_user.id
+
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        rows = await conn.fetch("""
+            SELECT steam_login, amount, commission, created_at
+            FROM steam_topups
+            WHERE telegram_id = $1
+            ORDER BY created_at DESC
+            LIMIT $2
+        """, user_id, 15)
+        await conn.close()
+
+        if not rows:
+            text = "❌ У вас пока нет заказов."
+        else:
+            header = "📦 Ваши последние заказы:\n\n"
+            text = header
+            for row in rows:
+                block = (
+                    f"👤 Логин: <code>{row['steam_login']}</code>\n"
+                    f"💸 Сумма: {row['amount']:.2f}₽\n"
+                    f"💰 Комиссия: {row['commission']:.2f}₽\n"
+                    f"🕒 Время: {row['created_at'].strftime('%Y-%m-%d %H:%M')}\n\n"
+                )
+                # Проверяем, не превысим ли лимит в 4096 символов
+                if len(text) + len(block) > 4096:
+                    break
+                text += block
+
+        keyboard = [[InlineKeyboardButton("⬅️ Назад в меню", callback_data='back_to_menu')]]
+
+        await update.callback_query.message.edit_text(
+            text,
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    except Exception as e:
+        print(f"Ошибка при получении заказов: {e}")
+        await update.callback_query.message.edit_text("⚠️ Произошла ошибка при получении заказов.")
 
 async def admin_panel(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -279,7 +350,7 @@ async def handle_text(update: Update, context: CallbackContext):
 
             commission = calculate_commission(amount, currency)
             total = round(amount + commission, 2)
-
+            context.user_data['commission'] = commission
             steam_login = context.user_data.get('steam_login')
 
             keyboard = [
@@ -353,7 +424,7 @@ def transfer_to_steam(amount, login):
         return False
 
 # Асинхронная проверка статуса платежа
-async def check_payment_status(payment_id, amount, query, recipient):
+async def check_payment_status(payment_id, amount, query, recipient, commission):
     print("Начинаем проверку статуса платежа...")
     
     previous_message = None  # Переменная для хранения предыдущего сообщения
@@ -369,6 +440,13 @@ async def check_payment_status(payment_id, amount, query, recipient):
                 
                 # Это Steam логин — переводим средства
                 result = transfer_to_steam(amount, recipient)
+
+                # Записываем в базу данных
+
+                username = query.from_user.username
+                user_id = query.from_user.id
+
+                await log_steam_topup(user_id, username, recipient, amount, commission)
                 if result:
                     message = "💸 Деньги поступили! 🎉 Ожидайте, пожалуйста, поступление на ваш баланс Steam. ⏳"
                     break
@@ -406,6 +484,8 @@ async def confirmation_handler(update: Update, context: CallbackContext):
         amount = context.user_data['amount']
         login = context.user_data['steam_login']
         currency = context.user_data.get('currency')
+        commission = context.user_data.get('commission')
+
         # Создаем платеж и получаем ссылку на оплату
         payment_url, payment_id = create_payment_ykassa(amount, login, currency)
 
@@ -414,9 +494,9 @@ async def confirmation_handler(update: Update, context: CallbackContext):
 
         # Отправляем ссылку на оплату
         await update.callback_query.edit_message_text(f"🔗 Перейдите по ссылке для оплаты:\n{payment_url}")
-        
+
         # Запускаем асинхронную задачу для проверки статуса платежа
-        asyncio.create_task(check_payment_status(payment_id, amount, update.callback_query, login))
+        asyncio.create_task(check_payment_status(payment_id, amount, update.callback_query, login, commission))
 
     else:
         await update.callback_query.edit_message_text("🚫 Операция отменена. Возврат в главное меню.")
@@ -447,6 +527,7 @@ def main():
     app.add_handler(CallbackQueryHandler(confirmation_handler, pattern="^confirm_payment$"))
     app.add_handler(CallbackQueryHandler(currency_chosen, pattern="^currency_usd$"))
     app.add_handler(CallbackQueryHandler(cancel, pattern="^cancel_payment$"))
+    app.add_handler(CallbackQueryHandler(view_my_orders, pattern="^my_orders$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.run_polling()
 
